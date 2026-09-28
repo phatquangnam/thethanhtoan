@@ -1,0 +1,114 @@
+{
+  "entities": {
+    "Card": {
+      "title": "Card",
+      "description": "Credit card tracked in the system",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 200 },
+        "bankName": { "type": "string", "maxLength": 100 },
+        "last4Digits": { "type": "string", "maxLength": 10 },
+        "defaultDueDay": { "type": "number" },
+        "autoWeekendShift": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "statementDay": { "type": "number" },
+        "creditLimit": { "type": "number" },
+        "cardType": { "type": "string", "maxLength": 50 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "colorTheme": { "type": "string", "maxLength": 50 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "name", "bankName", "defaultDueDay", "status"]
+    },
+    "Obligation": {
+      "title": "Obligation",
+      "description": "Monthly credit card obligation record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "cardId": { "type": "string", "maxLength": 128 },
+        "month": { "type": "string", "maxLength": 10 },
+        "dataState": { "type": "string", "enum": ["UNUPDATED", "DECLARED", "NO_EXPENSE"] },
+        "amount": { "type": "number" },
+        "dueDay": { "type": "number" },
+        "actualDueDate": { "type": "string", "maxLength": 20 },
+        "dueDateSource": { "type": "string", "maxLength": 50 },
+        "isEstimatedDue": { "type": "boolean" },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "cardId", "month", "dataState", "amount", "actualDueDate"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Payment transaction against a card obligation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "obligationId": { "type": "string", "maxLength": 128 },
+        "cardId": { "type": "string", "maxLength": 128 },
+        "amount": { "type": "number" },
+        "paidDate": { "type": "string", "maxLength": 20 },
+        "status": { "type": "string", "enum": ["VALID", "CANCELLED"] },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "referenceCode": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "userId", "obligationId", "cardId", "amount", "paidDate", "status"]
+    },
+    "UserConfig": {
+      "title": "UserConfig",
+      "description": "User preferences and notification settings",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "dailyDigestTime": { "type": "string", "maxLength": 10 },
+        "emailEnabled": { "type": "boolean" },
+        "targetEmail": { "type": "string", "maxLength": 200 },
+        "discreteMode": { "type": "boolean" }
+      },
+      "required": ["userId"]
+    },
+    "UserSnapshot": {
+      "title": "UserSnapshot",
+      "description": "Aggregated user snapshot summary for real-time tracking",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "totalCards": { "type": "number" },
+        "totalObligations": { "type": "number" },
+        "totalPayments": { "type": "number" },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["userId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/cards/{cardId}": {
+      "schema": "Card",
+      "description": "Stores user cards"
+    },
+    "/users/{userId}/obligations/{obligationId}": {
+      "schema": "Obligation",
+      "description": "Stores monthly payment obligations"
+    },
+    "/users/{userId}/payments/{paymentId}": {
+      "schema": "Payment",
+      "description": "Stores payment transactions"
+    },
+    "/users/{userId}/config/{configId}": {
+      "schema": "UserConfig",
+      "description": "Stores user configuration"
+    },
+    "/users/{userId}/snapshots/{snapshotId}": {
+      "schema": "UserSnapshot",
+      "description": "Stores aggregated user snapshot"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Remix Sổ Theo Dõi Thanh Toán Thẻ",
+  "description": "Hệ thống quản lý nghĩa vụ thanh toán thẻ ngân hàng, ma trận ngày đến hạn, ghi nhận thanh toán và nhắc việc thông minh.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
