@@ -1,20 +1,9 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Sổ theo dõi thanh toán thẻ
 
-# Run and deploy your AI Studio app
+Ứng dụng React/Vite, Express trên Vercel Functions, Supabase Auth, PostgreSQL và Realtime.
 
-This contains everything you need to run your app locally.
+Đọc [HUONG_DAN_TRIEN_KHAI.md](HUONG_DAN_TRIEN_KHAI.md) để thiết lập Supabase, Vercel, tài khoản và nhập dữ liệu cũ.
 
-View your app in AI Studio: https://ai.studio/apps/1414724c-9637-4c68-9a82-1fe8d779f32b
+Chạy tại máy có Node.js: sao chép `.env.example` thành `.env.local`, thay giá trị theo dự án Supabase (không commit), chạy `npm install`, `npm run dev`. Build: `npm run lint` và `npm run build`.
 
-## Run Locally
-
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Dữ liệu thật trong `data/db.json` của bản gốc không thuộc mã triển khai. Không đưa dữ liệu, connection string hoặc bản sao lưu lên kho mã.

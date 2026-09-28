@@ -1,30 +1,15 @@
 import express from 'express';
+import { config as loadLocalEnv } from 'dotenv';
 import type { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import {
-  loadDB,
-  saveDB,
-  onDBChange,
-  getDefaultUser,
-  findUserByEmail,
-  findUserById,
-  createUser,
-  validateUserLogin,
-  updateUserPassword,
-  hashPassword,
-  seed40Cards,
-  ensureCurrentAndNextMonthObligations,
-  ensureMonthObligations,
-  ensureYearObligations,
-  enrichObligation,
-  getMonthSummary,
-  updateObligationReminderPrediction,
-} from './src/server/db.ts';
-import { runReminderCheck, startBackgroundScheduler } from './src/server/cron.ts';
+import { Pool } from 'pg';
+import { createClient } from '@supabase/supabase-js';
+import { loadDB, saveDB, emptyDB, withRequestDB, seed40Cards, ensureCurrentAndNextMonthObligations, ensureMonthObligations, ensureYearObligations, enrichObligation, getMonthSummary, updateObligationReminderPrediction } from './src/server/db.ts';
+import type { DatabaseSchema } from './src/server/db.ts';
+import { runReminderCheck } from './src/server/cron.ts';
 import { runAllTestCases } from './src/server/testRunner.ts';
-import { getFirebaseStatus, syncUserDataToFirebase } from './src/server/firebaseSync.ts';
 import type { Card, Obligation, Payment, AuditLog, UserConfig } from './src/types.ts';
 import {
   calculateDueDate,
@@ -37,63 +22,93 @@ import {
   parseDueDayValue,
 } from './src/utils/dateUtils.ts';
 
-async function startServer() {
+loadLocalEnv({ path: '.env.local', quiet: true });
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 3, ssl: { rejectUnauthorized: true } });
+const supabase = process.env.VITE_SUPABASE_URL && process.env.VITE_SUPABASE_ANON_KEY
+  ? createClient(process.env.VITE_SUPABASE_URL, process.env.VITE_SUPABASE_ANON_KEY, { auth: { persistSession: false } })
+  : null;
+
+export async function createApp(serveFrontend = false) {
   const app = express();
   const PORT = process.env.PORT && process.env.PORT !== '8080' ? Number(process.env.PORT) : 3000;
 
   app.use(express.json({ limit: '10mb' }));
 
-  // Initialize DB and ensure default user + 40 sample cards
-  const adminUser = getDefaultUser();
-  const db = loadDB();
-  const existingCards = db.cards.filter(c => c.userId === adminUser.id);
-  if (existingCards.length === 0) {
-    seed40Cards(adminUser.id, false);
-  }
-  ensureCurrentAndNextMonthObligations(adminUser.id);
-
-  // Start background cron scheduler
-  startBackgroundScheduler();
-
-  // Auth middleware (Extracts user from Authorization token, x-user-id, or x-user-email; defaults to adminUser)
+  // Each request owns a locked, per-user document. Commit before responding.
+  // PostgreSQL row locks prevent simultaneous devices from overwriting each other.
+  app.use('/api', async (req: Request, res: Response, next) => {
+    if (req.path === '/health') return next();
+    const token = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+    if (!token || !supabase || !process.env.DATABASE_URL) {
+      res.status(401).json({ error: 'Vui lòng đăng nhập bằng Supabase.' });
+      return;
+    }
+    const { data: authData, error: authError } = await supabase.auth.getUser(token);
+    if (authError || !authData.user?.email) {
+      res.status(401).json({ error: 'Phiên đăng nhập hết hạn hoặc không hợp lệ.' });
+      return;
+    }
+    let client;
+    try {
+      client = await pool.connect();
+      await client.query('BEGIN');
+      await client.query('INSERT INTO public.app_state (user_id, document) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING', [authData.user.id, JSON.stringify(emptyDB())]);
+      const result = await client.query('SELECT document FROM public.app_state WHERE user_id = $1 FOR UPDATE', [authData.user.id]);
+      const context = { db: result.rows[0].document as DatabaseSchema, dirty: false };
+      const db = context.db;
+      let user = db.users.find(u => u.id === authData.user.id);
+      if (!user) {
+        user = {
+          id: authData.user.id, username: authData.user.email.split('@')[0],
+          name: String(authData.user.user_metadata?.full_name || authData.user.email.split('@')[0]),
+          email: authData.user.email, role: 'user', createdAt: new Date().toISOString(),
+        };
+        db.users = [user];
+        db.userConfigs[user.id] = { userId: user.id, dailyDigestTime: '08:00', emailEnabled: false, targetEmail: user.email, discreteMode: false };
+        context.dirty = true;
+      }
+      (req as any).user = user;
+      const activeClient = client;
+      const originalSend = res.send.bind(res);
+      let ended = false;
+      res.send = ((body: any) => {
+        if (ended) return res;
+        ended = true;
+        void (async () => {
+          try {
+            if (context.dirty) {
+              await activeClient.query('UPDATE public.app_state SET document = $2, updated_at = now() WHERE user_id = $1', [user.id, JSON.stringify(db)]);
+            }
+            await activeClient.query('COMMIT');
+            originalSend(body);
+          } catch (err) {
+            await activeClient.query('ROLLBACK').catch(() => {});
+            res.statusCode = 500;
+            originalSend(JSON.stringify({ error: 'Không thể lưu dữ liệu. Vui lòng thử lại.' }));
+          } finally {
+            activeClient.release();
+          }
+        })();
+        return res;
+      }) as typeof res.send;
+      res.on('close', () => {
+        if (!ended) { ended = true; void activeClient.query('ROLLBACK').finally(() => activeClient.release()); }
+      });
+      withRequestDB(context, next);
+    } catch (err) {
+      if (client) { await client.query('ROLLBACK').catch(() => {}); client.release(); }
+      if (!res.headersSent) res.status(503).json({ error: 'Không kết nối được cơ sở dữ liệu Supabase.' });
+    }
+  });
   const authMiddleware = (req: Request, res: Response, next: express.NextFunction) => {
-    let user = null;
-    const authHeader = req.headers['authorization'];
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.substring(7);
-      try {
-        const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
-        if (decoded && decoded.userId) {
-          user = findUserById(decoded.userId);
-        } else if (decoded && decoded.email) {
-          user = findUserByEmail(decoded.email);
-        }
-      } catch (e) {
-        // invalid base64 token format, fallback
-      }
-    }
-
-    if (!user) {
-      const userId = req.headers['x-user-id'] as string;
-      if (userId) {
-        user = findUserById(userId);
-      }
-    }
-
-    if (!user) {
-      const email = req.headers['x-user-email'] as string;
-      if (email) {
-        user = findUserByEmail(email);
-      }
-    }
-
-    if (!user) {
-      user = adminUser;
-    }
-
-    (req as any).user = user;
+    if (!(req as any).user) return res.status(401).json({ error: 'Chưa đăng nhập.' });
     next();
   };
+  const db = new Proxy({} as DatabaseSchema, {
+    get: (_target, key) => (loadDB() as any)[key],
+    set: (_target, key, value) => { (loadDB() as any)[key] = value; saveDB(); return true; },
+  });
 
   // -------------------------------------------------------------
   // API Routes
@@ -103,183 +118,10 @@ async function startServer() {
     res.json({ status: 'ok', time: new Date().toISOString() });
   });
 
-  // Real-time Server-Sent Events (SSE) for instant cross-tab and client synchronization
-  const sseClients = new Set<Response>();
-
-  app.get('/api/events', (req: Request, res: Response) => {
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    if ((res as any).flushHeaders) {
-      (res as any).flushHeaders();
-    }
-
-    // Initial connection handshake
-    res.write(`data: ${JSON.stringify({ type: 'connected', timestamp: new Date().toISOString() })}\n\n`);
-
-    sseClients.add(res);
-
-    req.on('close', () => {
-      sseClients.delete(res);
-    });
-  });
-
-  // Heartbeat ping every 25 seconds to keep connection alive through proxies
-  setInterval(() => {
-    for (const client of sseClients) {
-      try {
-        client.write(': ping\n\n');
-      } catch (e) {
-        sseClients.delete(client);
-      }
-    }
-  }, 25000);
-
-  // Broadcast any database change to all connected clients immediately
-  onDBChange(event => {
-    const payload = `data: ${JSON.stringify({ type: 'data_changed', ...event })}\n\n`;
-    for (const client of sseClients) {
-      try {
-        client.write(payload);
-      } catch (e) {
-        sseClients.delete(client);
-      }
-    }
-
-    // Realtime synchronization to Firebase Cloud Firestore for user
-    const defaultUser = getDefaultUser();
-    syncUserDataToFirebase(defaultUser.id, db).catch(err => {
-      console.warn('Background Firebase sync error:', err?.message || err);
-    });
-  });
-
-  // Initial sync to Firebase on server startup
-  const startupUser = getDefaultUser();
-  syncUserDataToFirebase(startupUser.id, db).catch(() => {});
-
-  // Firebase Realtime Status & Manual Trigger
-  app.get('/api/firebase/status', (req: Request, res: Response) => {
-    res.json(getFirebaseStatus());
-  });
-
-  app.post('/api/firebase/sync', authMiddleware, async (req: Request, res: Response) => {
-    const user = (req as any).user;
-    const result = await syncUserDataToFirebase(user.id, db);
-    res.json({ ...result, ...getFirebaseStatus() });
-  });
-
-  // Auth
-  app.post('/api/auth/login', (req: Request, res: Response) => {
-    const { email, password } = req.body;
-    if (!email || typeof email !== 'string') {
-      res.status(400).json({ error: 'Vui lòng cung cấp địa chỉ email.' });
-      return;
-    }
-
-    const result = validateUserLogin(email, password);
-    if (!result.success || !result.user) {
-      res.status(401).json({ error: result.error || 'Đăng nhập không thành công.' });
-      return;
-    }
-
-    const user = result.user;
-    const token = Buffer.from(JSON.stringify({ userId: user.id, email: user.email, time: Date.now() })).toString('base64');
-    const config = db.userConfigs[user.id] || {
-      userId: user.id,
-      dailyDigestTime: '08:00',
-      emailEnabled: false,
-      targetEmail: user.email,
-      discreteMode: false,
-    };
-
-    res.json({ token, user, config });
-  });
-
-  app.post('/api/auth/register', (req: Request, res: Response) => {
-    const { email, password, name } = req.body;
-    if (!email || !email.includes('@')) {
-      res.status(400).json({ error: 'Vui lòng cung cấp email hợp lệ.' });
-      return;
-    }
-
-    const normalized = email.trim().toLowerCase();
-    const existing = findUserByEmail(normalized);
-    if (existing) {
-      res.status(400).json({ error: 'Tài khoản email này đã tồn tại. Vui lòng đăng nhập.' });
-      return;
-    }
-
-    if (password && password.length < 6) {
-      res.status(400).json({ error: 'Mật khẩu cần tối thiểu 6 ký tự.' });
-      return;
-    }
-
-    const newUser = createUser(normalized, name, password);
-    const token = Buffer.from(JSON.stringify({ userId: newUser.id, email: newUser.email, time: Date.now() })).toString('base64');
-    const config = db.userConfigs[newUser.id];
-
-    res.status(201).json({ token, user: newUser, config });
-  });
-
-  app.post('/api/auth/google-login', (req: Request, res: Response) => {
-    const { email, name, avatarUrl } = req.body;
-    if (!email || !email.includes('@')) {
-      res.status(400).json({ error: 'Email Google không hợp lệ.' });
-      return;
-    }
-
-    const normalized = email.trim().toLowerCase();
-    let user = findUserByEmail(normalized);
-    if (!user) {
-      user = createUser(normalized, name);
-    }
-    if (avatarUrl && !user.avatarUrl) {
-      user.avatarUrl = avatarUrl;
-    }
-    user.lastLoginAt = new Date().toISOString();
-    saveDB();
-
-    const token = Buffer.from(JSON.stringify({ userId: user.id, email: user.email, time: Date.now() })).toString('base64');
-    const config = db.userConfigs[user.id];
-
-    res.json({ token, user, config });
-  });
-
-  app.post('/api/auth/change-password', authMiddleware, (req: Request, res: Response) => {
-    const user = (req as any).user;
-    const { oldPassword, newPassword } = req.body;
-
-    if (!newPassword || newPassword.length < 6) {
-      res.status(400).json({ error: 'Mật khẩu mới cần tối thiểu 6 ký tự.' });
-      return;
-    }
-
-    if (user.passwordHash) {
-      const hashedOld = hashPassword(oldPassword || '');
-      if (user.passwordHash !== hashedOld) {
-        res.status(400).json({ error: 'Mật khẩu hiện tại không chính xác.' });
-        return;
-      }
-    }
-
-    updateUserPassword(user.id, newPassword);
-    res.json({ success: true, message: 'Đổi mật khẩu thành công.' });
-  });
-
-  app.post('/api/auth/logout', authMiddleware, (req: Request, res: Response) => {
-    res.json({ success: true, message: 'Đã đăng xuất.' });
-  });
-
+  // Supabase Auth is handled by the browser SDK; user identity is checked above.
   app.get('/api/auth/me', authMiddleware, (req: Request, res: Response) => {
     const user = (req as any).user;
-    const config = db.userConfigs[user.id] || {
-      userId: user.id,
-      dailyDigestTime: '08:00',
-      emailEnabled: false,
-      targetEmail: user.email,
-      discreteMode: false,
-    };
-    res.json({ user, config });
+    res.json({ user, config: db.userConfigs[user.id] });
   });
 
   // Month Summary
@@ -1194,6 +1036,7 @@ async function startServer() {
   // Notifications
   app.get('/api/notifications', authMiddleware, (req: Request, res: Response) => {
     const user = (req as any).user;
+    runReminderCheck(user.id);
     const notifs = db.notifications.filter(n => n.userId === user.id).slice(0, 50);
     const unreadCount = db.notifications.filter(n => n.userId === user.id && !n.read).length;
     res.json({ notifications: notifs, unreadCount });
@@ -1225,7 +1068,7 @@ async function startServer() {
   // User Config / Settings
   app.put('/api/settings/config', authMiddleware, (req: Request, res: Response) => {
     const user = (req as any).user;
-    const { dailyDigestTime, emailEnabled, targetEmail, discreteMode, smtpHost, smtpPort, smtpUser, smtpPass } = req.body;
+    const { dailyDigestTime, emailEnabled, targetEmail, discreteMode } = req.body;
 
     const config: UserConfig = db.userConfigs[user.id] || {
       userId: user.id,
@@ -1239,21 +1082,9 @@ async function startServer() {
     if (emailEnabled !== undefined) config.emailEnabled = Boolean(emailEnabled);
     if (targetEmail) config.targetEmail = targetEmail;
     if (discreteMode !== undefined) config.discreteMode = Boolean(discreteMode);
-    if (smtpHost !== undefined) config.smtpHost = smtpHost;
-    if (smtpPort !== undefined) config.smtpPort = Number(smtpPort);
-    if (smtpUser !== undefined) config.smtpUser = smtpUser;
-    if (smtpPass !== undefined) config.smtpPass = smtpPass;
-
     db.userConfigs[user.id] = config;
     saveDB();
     res.json(config);
-  });
-
-  // Reset / Reseed 40 Sample Cards
-  app.post('/api/settings/seed-40-cards', authMiddleware, (req: Request, res: Response) => {
-    const user = (req as any).user;
-    const result = seed40Cards(user.id, true);
-    res.json({ success: true, ...result });
   });
 
   // Backup Export
@@ -1267,6 +1098,7 @@ async function startServer() {
       obligations: db.obligations.filter(o => o.userId === user.id),
       payments: db.payments.filter(p => p.userId === user.id),
       auditLogs: db.auditLogs.filter(a => a.userId === user.id),
+      notifications: db.notifications.filter(n => n.userId === user.id),
       userConfig: db.userConfigs[user.id],
     };
 
@@ -1290,6 +1122,7 @@ async function startServer() {
     db.obligations = db.obligations.filter(o => o.userId !== user.id);
     db.payments = db.payments.filter(p => p.userId !== user.id);
     db.auditLogs = db.auditLogs.filter(a => a.userId !== user.id);
+    db.notifications = db.notifications.filter(n => n.userId !== user.id);
 
     // Restore cards
     for (const c of backupData.cards) {
@@ -1310,6 +1143,20 @@ async function startServer() {
       for (const p of backupData.payments) {
         p.userId = user.id;
         db.payments.push(p);
+      }
+    }
+
+    if (Array.isArray(backupData.auditLogs)) {
+      for (const log of backupData.auditLogs) {
+        log.userId = user.id;
+        db.auditLogs.push(log);
+      }
+    }
+
+    if (Array.isArray(backupData.notifications)) {
+      for (const notification of backupData.notifications) {
+        notification.userId = user.id;
+        db.notifications.push(notification);
       }
     }
 
@@ -1341,34 +1188,22 @@ async function startServer() {
     res.json(testResults);
   });
 
-  // -------------------------------------------------------------
-  // Vite Middleware & Static Serving Setup
-  // -------------------------------------------------------------
-  const distPath = path.join(process.cwd(), 'dist');
-  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
-  const isDev = process.env.NODE_ENV === 'development' || process.env.npm_lifecycle_event === 'dev';
-  const isProduction = process.env.NODE_ENV === 'production' || (!isDev && hasDist);
-
-  if (!isProduction) {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    // Serve static frontend assets for both root and GitHub Pages base prefix
-    app.use('/THANHTOAN4300', express.static(distPath));
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  if (serveFrontend) {
+    const distPath = path.join(process.cwd(), 'dist');
+    if (process.env.NODE_ENV !== 'production') {
+      const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
+      app.use(vite.middlewares);
+    } else {
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
+    }
   }
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+  return app;
 }
 
-startServer().catch(err => {
-  console.error('Fatal error starting server:', err);
-});
+if (!process.env.VERCEL) {
+  createApp(true).then(app => {
+    const port = Number(process.env.PORT || 3000);
+    app.listen(port, '0.0.0.0', () => console.log(`Server running on ${port}`));
+  }).catch(err => console.error('Server startup failed:', err));
+}
