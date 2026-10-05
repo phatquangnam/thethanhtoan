@@ -1,0 +1,3 @@
+[functions.send-digest]
+verify_jwt = false
+# Hàm tự kiểm tra Authorization: Bearer CRON_SECRET. Không mở truy cập công khai.

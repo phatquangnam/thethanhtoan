@@ -1,9 +1,14 @@
 # Sổ theo dõi thanh toán thẻ
 
-Ứng dụng React/Vite, Express trên Vercel Functions, Supabase Auth, PostgreSQL và Realtime.
+React + Vite + Tailwind + Supabase Auth/Postgres/Realtime. Triển khai Vercel.
 
-Đọc [HUONG_DAN_TRIEN_KHAI.md](HUONG_DAN_TRIEN_KHAI.md) để thiết lập Supabase, Vercel, tài khoản và nhập dữ liệu cũ.
+Bắt đầu bằng `HUONG_DAN_CAI_DAT.md` hoặc mở `HUONG_DAN_MINH_HOA.html` trong trình duyệt.
 
-Chạy tại máy có Node.js: sao chép `.env.example` thành `.env.local`, thay giá trị theo dự án Supabase (không commit), chạy `npm install`, `npm run dev`. Build: `npm run lint` và `npm run build`.
+Tạo database: supabase/01_TAO_CO_SO_DU_LIEU.sql.
+Bật lịch thông báo trong ứng dụng: supabase/02_BAT_LICH_NHAC.sql.
+Email là phần tùy chọn, xem hướng dẫn. Không đưa Secret key vào VITE_.
 
-Dữ liệu thật trong `data/db.json` của bản gốc không thuộc mã triển khai. Không đưa dữ liệu, connection string hoặc bản sao lưu lên kho mã.
+Không có dữ liệu mẫu tự động. Tạo user trong Supabase Authentication → Users, đăng nhập và nhập thẻ.
+
+Kiểm thử: npm ci && npm test.
+Build: npm run build.
