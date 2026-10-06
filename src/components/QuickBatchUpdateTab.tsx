@@ -172,7 +172,9 @@ export const QuickBatchUpdateTab: React.FC<QuickBatchUpdateTabProps> = ({
       return r.cardName.toLowerCase().includes(q) || r.bankName.toLowerCase().includes(q);
     }
     return true;
-  });
+  }).sort((a, b) =>
+    a.cardName.trim().localeCompare(b.cardName.trim(), 'vi', { sensitivity: 'base', numeric: true })
+  );
 
   return (
     <div className="space-y-4">

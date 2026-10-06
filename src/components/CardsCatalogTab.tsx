@@ -67,7 +67,9 @@ export const CardsCatalogTab: React.FC<CardsCatalogTabProps> = ({
         return c.name.toLowerCase().includes(q) || c.bankName.toLowerCase().includes(q);
       }
       return true;
-    });
+    }).sort((a, b) =>
+      a.name.trim().localeCompare(b.name.trim(), 'vi', { sensitivity: 'base', numeric: true })
+    );
   }, [cards, selectedBank, statusFilter, searchTerm]);
 
   const isAllFilteredSelected =
